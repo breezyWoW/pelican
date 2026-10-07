@@ -1,0 +1,1524 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Voxel Pelican Ride</title>
+<style>
+  :root {
+    --panel: rgba(255, 255, 255, 0.72);
+    --panel-border: rgba(255, 255, 255, 0.9);
+    --ink: #1d2a33;
+    --ink-soft: #4b5d69;
+    --accent: #e0443e;
+    --accent-ink: #ffffff;
+    --chip: rgba(29, 42, 51, 0.07);
+  }
+  html, body {
+    margin: 0;
+    height: 100%;
+    overflow: hidden;
+    background: #cfe9f7;
+    color: var(--ink);
+    font-family: ui-rounded, "SF Pro Rounded", "Nunito", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  canvas { display: block; touch-action: none; }
+  .panel {
+    position: fixed;
+    background: var(--panel);
+    border: 1px solid var(--panel-border);
+    border-radius: 14px;
+    box-shadow: 0 6px 24px rgba(30, 60, 90, 0.18);
+    backdrop-filter: blur(10px) saturate(1.3);
+    -webkit-backdrop-filter: blur(10px) saturate(1.3);
+  }
+  #hud {
+    top: 16px;
+    left: 16px;
+    max-width: 300px;
+    padding: 12px 16px 13px;
+  }
+  #hud h1 {
+    margin: 0 0 4px;
+    font-size: 18px;
+    letter-spacing: 0.2px;
+  }
+  #hud p {
+    margin: 0;
+    font-size: 13px;
+    line-height: 1.45;
+    color: var(--ink-soft);
+  }
+  #hud kbd {
+    font: inherit;
+    font-size: 11px;
+    padding: 0 5px;
+    border-radius: 5px;
+    background: var(--chip);
+  }
+  #bar {
+    left: 50%;
+    bottom: max(16px, env(safe-area-inset-bottom));
+    transform: translateX(-50%);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px;
+    flex-wrap: wrap;
+    justify-content: center;
+    width: max-content;
+    max-width: calc(100vw - 32px);
+    box-sizing: border-box;
+  }
+  .seg {
+    display: flex;
+    background: var(--chip);
+    border-radius: 10px;
+    padding: 3px;
+  }
+  button {
+    font: inherit;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--ink);
+    background: transparent;
+    border: 0;
+    border-radius: 8px;
+    padding: 7px 12px;
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s;
+  }
+  button:hover { background: rgba(29, 42, 51, 0.08); }
+  button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .seg button.on { background: #fff; box-shadow: 0 1px 4px rgba(0, 0, 0, 0.12); }
+  #bell { background: var(--accent); color: var(--accent-ink); }
+  #bell:hover { background: #c93731; }
+  .speed {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+    font-weight: 600;
+    padding: 0 6px;
+  }
+  .speed input { width: 110px; accent-color: var(--accent); }
+  #msg {
+    position: fixed;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--ink-soft);
+    pointer-events: none;
+  }
+  @media (max-width: 560px) {
+    #hud { max-width: calc(100vw - 32px); box-sizing: border-box; }
+    #hud p { display: none; }
+    .speed input { width: 80px; }
+  }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+</head>
+<body>
+<div id="hud" class="panel">
+  <h1>Pelican on a Bike</h1>
+  <p>A pelican pedals laps around a little voxel island. Drag to orbit, scroll to zoom, click the pelican to make it honk. Keys: <kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd> camera, <kbd>Space</kbd> pause, <kbd>B</kbd> bell.</p>
+</div>
+<div id="bar" class="panel">
+  <div class="seg" role="group" aria-label="Camera">
+    <button data-cam="follow" class="on">Follow</button>
+    <button data-cam="chase">Chase</button>
+    <button data-cam="island">Island</button>
+  </div>
+  <button id="pause">Pause</button>
+  <button id="bell">Ring bell</button>
+  <label class="speed">Speed <input id="speed" type="range" min="0.25" max="2.5" step="0.05" value="1"></label>
+</div>
+<div id="msg">Building voxels…</div>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+// ---------------------------------------------------------------------------
+// Small helpers: seeded random, hashing, value noise
+// ---------------------------------------------------------------------------
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+const rnd = mulberry32(20261007);
+
+function hash3(x, y, z) {
+  let h = Math.imul(x | 0, 374761393) ^ Math.imul(y | 0, 668265263) ^ Math.imul(z | 0, 1442695041);
+  h = Math.imul(h ^ (h >>> 13), 1274126177);
+  return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
+}
+function vnoise(x, y) {
+  const xi = Math.floor(x), yi = Math.floor(y);
+  const xf = x - xi, yf = y - yi;
+  const u = xf * xf * (3 - 2 * xf), v = yf * yf * (3 - 2 * yf);
+  const a = hash3(xi, yi, 7), b = hash3(xi + 1, yi, 7);
+  const c = hash3(xi, yi + 1, 7), d = hash3(xi + 1, yi + 1, 7);
+  return a + (b - a) * u + (c - a) * v + (a - b - c + d) * u * v;
+}
+function fbm(x, y) {
+  return vnoise(x, y) * 0.55 + vnoise(x * 2.1 + 5.3, y * 2.1 - 1.7) * 0.3 + vnoise(x * 4.3 - 3.1, y * 4.3 + 8.2) * 0.15;
+}
+const pick = (arr, x, y, z) => arr[Math.floor(hash3(x * 3 + 11, y * 7 - 5, z * 5 + 3) * arr.length)];
+const wrapAngle = (a) => Math.atan2(Math.sin(a), Math.cos(a));
+
+// ---------------------------------------------------------------------------
+// Voxel model builder -> one InstancedMesh per model
+// ---------------------------------------------------------------------------
+const BOX = new THREE.BoxGeometry(1, 1, 1);
+
+class Vox {
+  constructor() { this.map = new Map(); }
+  static key(x, y, z) { return x + ',' + y + ',' + z; }
+  set(x, y, z, c) {
+    x = Math.round(x); y = Math.round(y); z = Math.round(z);
+    this.map.set(Vox.key(x, y, z), { x, y, z, c });
+    return this;
+  }
+  has(x, y, z) { return this.map.has(Vox.key(x, y, z)); }
+  box(x0, y0, z0, x1, y1, z1, c) {
+    for (let x = x0; x <= x1; x++)
+      for (let y = y0; y <= y1; y++)
+        for (let z = z0; z <= z1; z++)
+          this.set(x, y, z, typeof c === 'function' ? c(x, y, z) : c);
+    return this;
+  }
+  ellipsoid(cx, cy, cz, rx, ry, rz, c) {
+    for (let x = Math.floor(cx - rx); x <= Math.ceil(cx + rx); x++)
+      for (let y = Math.floor(cy - ry); y <= Math.ceil(cy + ry); y++)
+        for (let z = Math.floor(cz - rz); z <= Math.ceil(cz + rz); z++) {
+          const d = ((x - cx) / rx) ** 2 + ((y - cy) / ry) ** 2 + ((z - cz) / rz) ** 2;
+          if (d <= 1) this.set(x, y, z, typeof c === 'function' ? c(x, y, z, d) : c);
+        }
+    return this;
+  }
+  line(a, b, c, r = 0) {
+    const len = Math.hypot(b[0] - a[0], b[1] - a[1], b[2] - a[2]);
+    const n = Math.max(1, Math.ceil(len * 2));
+    const R = Math.ceil(r);
+    for (let i = 0; i <= n; i++) {
+      const t = i / n;
+      const px = a[0] + (b[0] - a[0]) * t, py = a[1] + (b[1] - a[1]) * t, pz = a[2] + (b[2] - a[2]) * t;
+      if (r <= 0) { this.set(px, py, pz, typeof c === 'function' ? c(t) : c); continue; }
+      for (let dx = -R; dx <= R; dx++)
+        for (let dy = -R; dy <= R; dy++)
+          for (let dz = -R; dz <= R; dz++)
+            if (dx * dx + dy * dy + dz * dz <= r * r + 0.01)
+              this.set(px + dx, py + dy, pz + dz, typeof c === 'function' ? c(t) : c);
+    }
+    return this;
+  }
+  build(material, { jitter = 0.05, cullBelow = -Infinity, cast = true, receive = true } = {}) {
+    const list = [];
+    for (const v of this.map.values()) {
+      const hidden =
+        this.has(v.x + 1, v.y, v.z) && this.has(v.x - 1, v.y, v.z) &&
+        this.has(v.x, v.y + 1, v.z) && (v.y - 1 < cullBelow || this.has(v.x, v.y - 1, v.z)) &&
+        this.has(v.x, v.y, v.z + 1) && this.has(v.x, v.y, v.z - 1);
+      if (!hidden) list.push(v);
+    }
+    const mesh = new THREE.InstancedMesh(BOX, material, Math.max(1, list.length));
+    mesh.count = list.length;
+    const m = new THREE.Matrix4();
+    const col = new THREE.Color();
+    list.forEach((v, i) => {
+      m.makeTranslation(v.x, v.y, v.z);
+      mesh.setMatrixAt(i, m);
+      col.setHex(v.c);
+      col.multiplyScalar(1 + (hash3(v.x, v.y, v.z) - 0.5) * jitter * 2);
+      mesh.setColorAt(i, col);
+    });
+    mesh.castShadow = cast;
+    mesh.receiveShadow = receive;
+    mesh.computeBoundingSphere();
+    return mesh;
+  }
+}
+
+// Wrap a mesh in a group whose origin is a pivot point given in model coordinates
+function pivoted(mesh, px, py, pz) {
+  const g = new THREE.Group();
+  g.position.set(px, py, pz);
+  mesh.position.set(-px, -py, -pz);
+  g.add(mesh);
+  return g;
+}
+
+function makeVoxelTexture() {
+  const c = document.createElement('canvas');
+  c.width = c.height = 32;
+  const g = c.getContext('2d');
+  g.fillStyle = '#ffffff';
+  g.fillRect(0, 0, 32, 32);
+  g.fillStyle = 'rgba(0,0,0,0.07)';
+  g.fillRect(0, 0, 32, 2); g.fillRect(0, 30, 32, 2);
+  g.fillRect(0, 0, 2, 32); g.fillRect(30, 0, 2, 32);
+  g.fillStyle = 'rgba(255,255,255,0.35)';
+  g.fillRect(2, 2, 28, 1); g.fillRect(2, 2, 1, 28);
+  const t = new THREE.CanvasTexture(c);
+  t.colorSpace = THREE.SRGBColorSpace;
+  t.anisotropy = 4;
+  return t;
+}
+
+// ---------------------------------------------------------------------------
+// Renderer, scene, camera, lights, sky
+// ---------------------------------------------------------------------------
+const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.0;
+document.body.prepend(renderer.domElement);
+
+const scene = new THREE.Scene();
+const HORIZON = new THREE.Color('#cde8f6');
+scene.background = HORIZON;
+scene.fog = new THREE.Fog(HORIZON, 80, 210);
+
+const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 900);
+
+const sky = new THREE.Mesh(
+  new THREE.SphereGeometry(500, 32, 16),
+  new THREE.ShaderMaterial({
+    side: THREE.BackSide,
+    depthWrite: false,
+    fog: false,
+    uniforms: {
+      top: { value: new THREE.Color('#3a86d6') },
+      mid: { value: new THREE.Color('#93cbf1') },
+      bottom: { value: HORIZON },
+    },
+    vertexShader: /* glsl */`
+      varying vec3 vDir;
+      void main() {
+        vDir = normalize(position);
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }`,
+    fragmentShader: /* glsl */`
+      uniform vec3 top; uniform vec3 mid; uniform vec3 bottom;
+      varying vec3 vDir;
+      void main() {
+        float h = vDir.y;
+        vec3 c = mix(mid, top, pow(clamp(h * 1.6, 0.0, 1.0), 0.75));
+        c = mix(bottom, c, smoothstep(-0.02, 0.16, h));
+        gl_FragColor = vec4(c, 1.0);
+        #include <tonemapping_fragment>
+        #include <colorspace_fragment>
+      }`,
+  })
+);
+scene.add(sky);
+
+scene.add(new THREE.HemisphereLight('#e4f3ff', '#6f8f52', 1.15));
+const sun = new THREE.DirectionalLight('#fff3dc', 2.6);
+sun.position.set(-38, 62, 30);
+sun.castShadow = true;
+sun.shadow.mapSize.set(2048, 2048);
+Object.assign(sun.shadow.camera, { left: -46, right: 46, top: 46, bottom: -46, near: 1, far: 200 });
+sun.shadow.bias = -0.0004;
+sun.shadow.normalBias = 0.03;
+scene.add(sun);
+scene.add(sun.target);
+
+// Materials
+const voxTex = makeVoxelTexture();
+const voxMat = new THREE.MeshStandardMaterial({ map: voxTex, roughness: 0.88, metalness: 0 });
+const plainMat = new THREE.MeshStandardMaterial({ roughness: 0.9, metalness: 0 });
+const cloudMat = new THREE.MeshStandardMaterial({ map: voxTex, roughness: 1, emissive: '#ffffff', emissiveIntensity: 0.22 });
+const waterUniforms = { uTime: { value: 0 } };
+const waterMat = new THREE.MeshStandardMaterial({ map: voxTex, roughness: 0.22, metalness: 0.05 });
+waterMat.onBeforeCompile = (shader) => {
+  shader.uniforms.uTime = waterUniforms.uTime;
+  shader.vertexShader = 'uniform float uTime;\n' + shader.vertexShader.replace(
+    '#include <begin_vertex>',
+    `#include <begin_vertex>
+     vec2 wp = vec2(instanceMatrix[3][0], instanceMatrix[3][2]);
+     transformed.y += sin(wp.x * 0.42 + uTime * 1.7) * 0.11 + cos(wp.y * 0.36 + uTime * 1.3) * 0.11
+                    + sin((wp.x + wp.y) * 0.9 + uTime * 2.6) * 0.04;`
+  );
+};
+waterMat.customProgramCacheKey = () => 'voxel-water';
+
+// ---------------------------------------------------------------------------
+// Island terrain
+// ---------------------------------------------------------------------------
+const COL = {
+  grass: [0x6cbf4b, 0x62b444, 0x78c954, 0x5eaa40, 0x70c24e],
+  grassDark: [0x4f9a37, 0x56a33b],
+  dirt: [0x8a5a32, 0x7d5130, 0x93633a],
+  stone: [0x8e8a84, 0x7f7b76, 0x9a968f],
+  sand: [0xeedca4, 0xe6d295, 0xf1e2b0],
+  sandDark: [0xd8c184, 0xcfb877],
+  path: [0xcfac74, 0xc6a26a, 0xd6b47e, 0xbf9a62],
+  pebble: [0xa69d90, 0xb5ac9f],
+  rock: [0x9c9890, 0x8a867f, 0xaaa69d],
+  trunk: [0x6e4428, 0x7a4b2c, 0x664026],
+  leaf: [0x3f9a3a, 0x4bab43, 0x36893a, 0x56b84a],
+  pine: [0x2f7342, 0x2a6a3c, 0x367c48],
+  palmTrunk: [0xa98053, 0x9b7349, 0xb48b5d],
+  frond: [0x4fb045, 0x47a33f, 0x5cbf4f],
+  water: [0x2b8bd6, 0x2f93dc, 0x2884cf, 0x3399e0],
+  shallow: [0x45b4e2, 0x4dbde6, 0x3faad9],
+  foam: [0xbfeaf7, 0xd8f3fb],
+  plank: [0xa0703f, 0x946638, 0xab7a47],
+  post: [0x6b4a2b],
+};
+
+const TRACK_A = 23, TRACK_B = 15, TRACK_TOP = 4;
+const track = (() => {
+  const M = 720, pts = [], cum = [0];
+  for (let i = 0; i <= M; i++) {
+    const t = (i / M) * Math.PI * 2;
+    pts.push(new THREE.Vector2(TRACK_A * Math.cos(t), TRACK_B * Math.sin(t)));
+  }
+  for (let i = 1; i <= M; i++) cum[i] = cum[i - 1] + pts[i].distanceTo(pts[i - 1]);
+  return { pts, cum, M, total: cum[M] };
+})();
+function trackAt(s) {
+  const { pts, cum, M, total } = track;
+  s = ((s % total) + total) % total;
+  let lo = 0, hi = M;
+  while (hi - lo > 1) { const mid = (lo + hi) >> 1; if (cum[mid] <= s) lo = mid; else hi = mid; }
+  const f = (s - cum[lo]) / (cum[hi] - cum[lo]);
+  const a = pts[lo], b = pts[hi];
+  const tx = b.x - a.x, tz = b.y - a.y, tl = Math.hypot(tx, tz);
+  return { x: a.x + tx * f, z: a.y + tz * f, tx: tx / tl, tz: tz / tl };
+}
+function distToTrack(x, z) {
+  let best = Infinity;
+  const pts = track.pts;
+  for (let i = 0; i < pts.length; i += 2) {
+    const d = (pts[i].x - x) ** 2 + (pts[i].y - z) ** 2;
+    if (d < best) best = d;
+  }
+  return Math.sqrt(best);
+}
+
+const N = 50, SIZE = 2 * N + 1;
+const H = new Int16Array(SIZE * SIZE);
+const DT = new Float32Array(SIZE * SIZE);
+const COAST = new Float32Array(SIZE * SIZE);
+const idx = (x, z) => (x + N) * SIZE + (z + N);
+const inGrid = (x, z) => Math.abs(x) <= N && Math.abs(z) <= N;
+const hAt = (x, z) => (inGrid(x, z) ? H[idx(x, z)] : 0);
+
+function coastRadius(x, z) {
+  const a = Math.atan2(z, x);
+  return 35.5 + (fbm(Math.cos(a) * 1.6 + 20, Math.sin(a) * 1.6 + 20) - 0.5) * 9;
+}
+for (let x = -N; x <= N; x++) {
+  for (let z = -N; z <= N; z++) {
+    const d = Math.hypot(x, z * 1.18) / coastRadius(x, z);
+    let h;
+    if (d > 1.08) h = 0;
+    else if (d > 1.0) h = 1;
+    else if (d > 0.9) h = 2;
+    else if (d > 0.85) h = 3;
+    else h = 4 + (fbm(x * 0.09 + 40, z * 0.09) > 0.6 ? 1 : 0);
+    const e = Math.hypot(x / TRACK_A, z / TRACK_B);
+    if (e < 0.72) {
+      const k = 1 - e / 0.72;
+      h += Math.round(Math.pow(k, 1.15) * (4.5 + fbm(x * 0.13 + 3, z * 0.13 - 7) * 6));
+    }
+    const dt = distToTrack(x, z);
+    if (dt < 3.2) h = TRACK_TOP;
+    else if (dt < 6.5) h = Math.round(TRACK_TOP + (h - TRACK_TOP) * ((dt - 3.2) / 3.3));
+    H[idx(x, z)] = h;
+    DT[idx(x, z)] = dt;
+    COAST[idx(x, z)] = d;
+  }
+}
+
+// Landmarks: windmill on the hill top, lighthouse on the coast, pier on the south beach
+let peak = { x: 0, z: 0, h: 0 };
+for (let x = -8; x <= 8; x++) for (let z = -6; z <= 6; z++) {
+  const h = hAt(x, z);
+  if (h > peak.h) peak = { x, z, h };
+}
+// Flatten a pad for the windmill
+for (let x = peak.x - 3; x <= peak.x + 3; x++) for (let z = peak.z - 3; z <= peak.z + 3; z++)
+  if (Math.hypot(x - peak.x, z - peak.z) <= 3.2) H[idx(x, z)] = Math.max(hAt(x, z), peak.h - 1) === peak.h ? peak.h : peak.h - 1;
+peak.h = hAt(peak.x, peak.z);
+
+const lighthouse = (() => {
+  const ang = 3.55, dx = Math.cos(ang), dz = Math.sin(ang);
+  let r = 18;
+  while (hAt(Math.round(dx * r), Math.round(dz * r)) >= 4) r += 0.5;
+  r -= 2.5;
+  return { x: Math.round(dx * r), z: Math.round(dz * r) };
+})();
+lighthouse.h = hAt(lighthouse.x, lighthouse.z);
+
+const pier = (() => {
+  const x = 9;
+  let z = 10;
+  while (hAt(x, z) >= 2) z++;
+  return { x, z0: z - 3, z1: z + 11 };
+})();
+
+const occupied = [
+  { x: peak.x, z: peak.z, r: 6 },
+  { x: lighthouse.x, z: lighthouse.z, r: 5 },
+  { x: pier.x, z: pier.z0, r: 4 },
+  { x: TRACK_A, z: 0, r: 6 },
+];
+const isFree = (x, z, r = 0) => occupied.every((o) => Math.hypot(o.x - x, o.z - z) > o.r + r);
+
+const W = new Vox(); // all static world voxels (unit size)
+
+for (let x = -N; x <= N; x++) {
+  for (let z = -N; z <= N; z++) {
+    const h = hAt(x, z);
+    if (h < 2) continue;
+    const top = h - 1;
+    const minN = Math.min(hAt(x + 1, z), hAt(x - 1, z), hAt(x, z + 1), hAt(x, z - 1));
+    const from = Math.max(0, Math.min(minN, top) - 1);
+    const d = COAST[idx(x, z)], dt = DT[idx(x, z)];
+    const isSand = d > 0.9 || (d > 0.85 && hash3(x, 1, z) > 0.5);
+    for (let y = from; y <= top; y++) {
+      let c;
+      if (isSand) c = y === top ? pick(COL.sand, x, y, z) : pick(COL.sandDark, x, y, z);
+      else if (y === top) {
+        if (dt < 2.5) {
+          const onStartLine = x >= 20 && x <= 26 && (z === 0 || z === -1);
+          c = onStartLine ? ((x + z) & 1 ? 0x2a2a2a : 0xf4f4f4) : (hash3(x, 9, z) > 0.93 ? pick(COL.pebble, x, y, z) : pick(COL.path, x, y, z));
+        } else if (dt < 3.2) c = hash3(x, 5, z) > 0.55 ? pick(COL.pebble, x, y, z) : pick(COL.grassDark, x, y, z);
+        else if (h >= 11 && fbm(x * 0.3, z * 0.3) > 0.55) c = pick(COL.rock, x, y, z);
+        else c = pick(COL.grass, x, y, z);
+      } else if (y >= top - 1 || y >= 3) c = pick(COL.dirt, x, y, z);
+      else c = pick(COL.stone, x, y, z);
+      W.set(x, y, z, c);
+    }
+  }
+}
+
+// --- Trees ------------------------------------------------------------------
+function oak(x, z) {
+  const h = hAt(x, z);
+  const th = 3 + Math.floor(rnd() * 3);
+  for (let i = 0; i < th; i++) W.set(x, h + i, z, pick(COL.trunk, x, h + i, z));
+  const cy = h + th + 1, r = 2.2 + rnd() * 1.1;
+  const R = Math.ceil(r);
+  for (let dx = -R; dx <= R; dx++) for (let dy = -R; dy <= R; dy++) for (let dz = -R; dz <= R; dz++) {
+    const dd = (dx / r) ** 2 + (dy / (r * 0.85)) ** 2 + (dz / r) ** 2;
+    if (dd > 1 || (dd > 0.7 && rnd() < 0.3)) continue;
+    const c = rnd() < 0.03 ? 0xd8423a : pick(COL.leaf, x + dx, cy + dy, z + dz);
+    W.set(x + dx, cy + dy, z + dz, c);
+  }
+}
+function pine(x, z) {
+  const h = hAt(x, z);
+  const th = 2 + Math.floor(rnd() * 2);
+  for (let i = 0; i < th; i++) W.set(x, h + i, z, pick(COL.trunk, x, h + i, z));
+  const layers = 6 + Math.floor(rnd() * 3);
+  for (let k = 0; k < layers; k++) {
+    const r = (3.1 - k * (2.8 / layers)) * (k % 2 ? 0.85 : 1);
+    const R = Math.ceil(r);
+    for (let dx = -R; dx <= R; dx++) for (let dz = -R; dz <= R; dz++)
+      if (dx * dx + dz * dz <= r * r) W.set(x + dx, h + th + k, z + dz, pick(COL.pine, x + dx, k, z + dz));
+  }
+  W.set(x, h + th + layers, z, COL.pine[0]);
+}
+function palm(x, z) {
+  const h = hAt(x, z);
+  const n = 7 + Math.floor(rnd() * 3);
+  const a = rnd() * Math.PI * 2, lx = Math.cos(a), lz = Math.sin(a);
+  let tx = x, ty = h, tz = z;
+  for (let i = 0; i < n; i++) {
+    const off = Math.pow(i / n, 2) * 3;
+    tx = x + lx * off; ty = h + i; tz = z + lz * off;
+    W.set(tx, ty, tz, pick(COL.palmTrunk, i, i, i));
+  }
+  ty += 1;
+  W.set(tx, ty, tz, COL.frond[0]);
+  for (let k = 0; k < 7; k++) {
+    const fa = (k / 7) * Math.PI * 2 + rnd() * 0.4;
+    const fx = Math.cos(fa), fz = Math.sin(fa);
+    for (let j = 1; j <= 5; j++) {
+      const py = ty + 0.8 - 0.16 * j * j;
+      W.set(tx + fx * j, py, tz + fz * j, pick(COL.frond, k, j, 0));
+      if (j >= 2 && j <= 4) W.set(tx + fx * j - fz * 0.8, py - 0.3, tz + fz * j + fx * 0.8, pick(COL.frond, k, j, 1));
+    }
+  }
+  W.set(tx + 1, ty - 1, tz, 0x6a4a2a);
+  W.set(tx, ty - 1, tz + 1, 0x5d4024);
+  W.set(tx - 1, ty - 1, tz, 0x6a4a2a);
+}
+function bush(x, z) {
+  const h = hAt(x, z);
+  W.ellipsoid(x, h, z, 1.6, 1.2, 1.6, (vx, vy, vz) => (rnd() < 0.06 ? 0xf2d14b : pick(COL.leaf, vx, vy, vz)));
+}
+function boulder(x, z) {
+  const h = hAt(x, z);
+  const r = 1 + rnd() * 0.8;
+  W.ellipsoid(x, h, z, r, r * 0.8, r * 1.1, (vx, vy, vz) => pick(COL.rock, vx, vy, vz));
+}
+
+const trees = [];
+function canPlace(x, z, minDist) {
+  return trees.every((t) => Math.hypot(t.x - x, t.z - z) >= minDist);
+}
+for (let tries = 0, placed = 0; tries < 4000 && placed < 22; tries++) {
+  const x = Math.round((rnd() - 0.5) * 2 * 22), z = Math.round((rnd() - 0.5) * 2 * 14);
+  if (!inGrid(x, z)) continue;
+  const h = hAt(x, z);
+  // trees grow inside the loop only, so the lawn outside keeps camera sightlines open
+  if (Math.hypot(x / TRACK_A, z / TRACK_B) > 1) continue;
+  if (h < 4 || DT[idx(x, z)] < 4.6 || !isFree(x, z, 2)) continue;
+  const slope = Math.max(...[[1, 0], [-1, 0], [0, 1], [0, -1]].map(([a, b]) => Math.abs(hAt(x + a, z + b) - h)));
+  if (slope > 1 || !canPlace(x, z, 5)) continue;
+  trees.push({ x, z });
+  (rnd() < 0.55 ? oak : pine)(x, z);
+  placed++;
+}
+for (let tries = 0, placed = 0; tries < 2000 && placed < 11; tries++) {
+  const a = rnd() * Math.PI * 2, r = 22 + rnd() * 18;
+  const x = Math.round(Math.cos(a) * r), z = Math.round(Math.sin(a) * r);
+  if (!inGrid(x, z) || hAt(x, z) !== 2 || !isFree(x, z, 2) || !canPlace(x, z, 6)) continue;
+  trees.push({ x, z });
+  palm(x, z);
+  placed++;
+}
+for (let tries = 0, placed = 0; tries < 2000 && placed < 16; tries++) {
+  const x = Math.round((rnd() - 0.5) * 64), z = Math.round((rnd() - 0.5) * 56);
+  const outside = Math.hypot(x / TRACK_A, z / TRACK_B) > 1;
+  if (!inGrid(x, z) || hAt(x, z) < 3 || DT[idx(x, z)] < (outside ? 13 : 4) || !isFree(x, z, 1) || !canPlace(x, z, 3)) continue;
+  trees.push({ x, z });
+  (rnd() < 0.6 ? bush : boulder)(x, z);
+  placed++;
+}
+
+// --- Windmill on the hill -----------------------------------------------------
+{
+  const { x: px, z: pz, h } = peak;
+  for (let y = 0; y < 10; y++) {
+    const r = 2.5 - y * 0.09;
+    const R = Math.ceil(r);
+    for (let dx = -R; dx <= R; dx++) for (let dz = -R; dz <= R; dz++) {
+      if (dx * dx + dz * dz > r * r) continue;
+      let c = y % 3 === 2 ? 0xe9dcc4 : 0xf6efe0;
+      if (dz >= 2 && Math.abs(dx) <= 0 && y <= 1) c = 0x6b4527;          // door
+      if (dz >= 1 && Math.abs(dx) === 0 && (y === 5 || y === 6)) c = 0x5aa7d8; // window
+      W.set(px + dx, h + y, pz + dz, c);
+    }
+  }
+  for (let k = 0; k < 4; k++) {
+    const r = 2.9 - k * 0.8;
+    const R = Math.ceil(r);
+    for (let dx = -R; dx <= R; dx++) for (let dz = -R; dz <= R; dz++)
+      if (dx * dx + dz * dz <= r * r) W.set(px + dx, h + 10 + k, pz + dz, k % 2 ? 0xa8442f : 0xbb5038);
+  }
+  for (let dz = 2; dz <= 4; dz++) W.set(px, h + 10, pz + dz, 0x5a3b22); // axle
+}
+
+// --- Lighthouse -----------------------------------------------------------------
+{
+  const { x: lx, z: lz, h } = lighthouse;
+  W.ellipsoid(lx, h - 0.5, lz, 3.4, 1.6, 3.4, (x, y, z) => pick(COL.rock, x, y, z));
+  const base = h + 1;
+  for (let y = 0; y < 13; y++) {
+    const r = 2.3 - y * 0.05;
+    const R = Math.ceil(r);
+    for (let dx = -R; dx <= R; dx++) for (let dz = -R; dz <= R; dz++)
+      if (dx * dx + dz * dz <= r * r) W.set(lx + dx, base + y, lz + dz, Math.floor(y / 3) % 2 ? 0xf5f3ee : 0xd9433b);
+  }
+  const top = base + 13;
+  for (let dx = -3; dx <= 3; dx++) for (let dz = -3; dz <= 3; dz++) {
+    const d2 = dx * dx + dz * dz;
+    if (d2 <= 9.5) W.set(lx + dx, top, lz + dz, 0x3c4248);
+    if (d2 <= 9.5 && d2 >= 6.5) W.set(lx + dx, top + 1, lz + dz, 0x2f353a);
+  }
+  for (let y = 1; y <= 2; y++) for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++)
+    W.set(lx + dx, top + y, lz + dz, (dx + dz + y) & 1 ? 0xffe27a : 0xfff2b0);
+  for (let k = 0; k < 3; k++) {
+    const r = 2.1 - k * 0.8;
+    const R = Math.ceil(r);
+    for (let dx = -R; dx <= R; dx++) for (let dz = -R; dz <= R; dz++)
+      if (dx * dx + dz * dz <= r * r) W.set(lx + dx, top + 3 + k, lz + dz, 0xc9372f);
+  }
+  W.set(lx, top + 6, lz, 0x3c4248);
+}
+
+// --- Pier -----------------------------------------------------------------------
+{
+  const { x: px, z0, z1 } = pier;
+  for (let z = z0; z <= z1; z++) {
+    for (let dx = -1; dx <= 1; dx++) W.set(px + dx, 1, z, pick(COL.plank, z, 0, dx));
+    if ((z - z0) % 3 === 0) {
+      for (const dx of [-2, 2]) {
+        W.set(px + dx, 0, z, COL.post[0]);
+        W.set(px + dx, 1, z, COL.post[0]);
+        W.set(px + dx, 2, z, COL.post[0]);
+      }
+    }
+  }
+  W.box(px - 1, 2, z1 - 1, px - 1, 2, z1 - 1, 0x8b5a2b); // crate
+  W.set(px - 1, 3, z1 - 1, 0x9fc4dc);                    // fish on the crate
+}
+
+// --- Start / finish arch ----------------------------------------------------------
+{
+  for (const ax of [19, 27]) for (let y = TRACK_TOP; y <= TRACK_TOP + 8; y++) W.set(ax, y, 0, 0x6d6f73);
+  for (let x = 19; x <= 27; x++) for (let y = TRACK_TOP + 7; y <= TRACK_TOP + 8; y++)
+    W.set(x, y, 0, (x + y) & 1 ? 0x262626 : 0xf5f5f5);
+  W.set(19, TRACK_TOP + 9, 0, 0xe0443e);
+  W.set(27, TRACK_TOP + 9, 0, 0xe0443e);
+}
+
+const worldMesh = W.build(voxMat, { cullBelow: 0 });
+worldMesh.position.y = 0.5;
+scene.add(worldMesh);
+
+// --- Small decorative voxels: flowers & grass tufts ------------------------------------
+{
+  const items = [];
+  const flowerCols = [0xf04e4e, 0xffd23f, 0xffffff, 0xb36bff, 0xff8fc2, 0x5fa8ff];
+  for (let tries = 0, n = 0; tries < 6000 && n < 340; tries++) {
+    const fx = (rnd() - 0.5) * 70, fz = (rnd() - 0.5) * 62;
+    const x = Math.round(fx), z = Math.round(fz);
+    if (!inGrid(x, z)) continue;
+    const h = hAt(x, z);
+    if (h < 3 || COAST[idx(x, z)] > 0.86 || DT[idx(x, z)] < 3.4 || !isFree(x, z, 0)) continue;
+    if (W.has(x, h, z)) continue; // something already stands here
+    if (rnd() < 0.42) {
+      const c = flowerCols[Math.floor(rnd() * flowerCols.length)];
+      items.push({ x: fx, y: h + 0.18, z: fz, s: 0.16, sy: 0.36, c: 0x3d8c32 });
+      items.push({ x: fx, y: h + 0.44, z: fz, s: 0.3, sy: 0.22, c });
+      items.push({ x: fx, y: h + 0.5, z: fz, s: 0.12, sy: 0.12, c: 0xffe066 });
+    } else {
+      for (let k = 0; k < 3; k++)
+        items.push({ x: fx + (k - 1) * 0.18, y: h + 0.15 + (k === 1 ? 0.06 : 0), z: fz + (rnd() - 0.5) * 0.2, s: 0.14, sy: 0.3 + (k === 1 ? 0.12 : 0), c: pick(COL.grassDark, x, k, z) });
+    }
+  }
+  const mesh = new THREE.InstancedMesh(BOX, plainMat, items.length);
+  const m = new THREE.Matrix4(), q = new THREE.Quaternion(), p = new THREE.Vector3(), s = new THREE.Vector3(), col = new THREE.Color();
+  items.forEach((it, i) => {
+    m.compose(p.set(it.x, it.y, it.z), q, s.set(it.s, it.sy, it.s));
+    mesh.setMatrixAt(i, m);
+    mesh.setColorAt(i, col.setHex(it.c));
+  });
+  mesh.receiveShadow = true;
+  mesh.computeBoundingSphere();
+  scene.add(mesh);
+}
+
+// --- Water ------------------------------------------------------------------------
+{
+  const WV = new Vox();
+  const WR = 78;
+  for (let x = -WR; x <= WR; x++) for (let z = -WR; z <= WR; z++) {
+    const h = hAt(x, z);
+    if (h >= 2) continue;
+    const nearLand = hAt(x + 1, z) >= 2 || hAt(x - 1, z) >= 2 || hAt(x, z + 1) >= 2 || hAt(x, z - 1) >= 2;
+    let c;
+    if (nearLand) c = pick(COL.foam, x, 0, z);
+    else if (h === 1) c = pick(COL.shallow, x, 0, z);
+    else c = fbm(x * 0.15, z * 0.15) > 0.62 ? 0x3fa3e3 : pick(COL.water, x, 0, z);
+    WV.map.set(Vox.key(x, 0, z), { x, y: 0, z, c });
+  }
+  // build without culling (single layer)
+  const list = [...WV.map.values()];
+  const mesh = new THREE.InstancedMesh(BOX, waterMat, list.length);
+  const m = new THREE.Matrix4(), col = new THREE.Color();
+  list.forEach((v, i) => {
+    m.makeTranslation(v.x, 1.0, v.z);
+    mesh.setMatrixAt(i, m);
+    mesh.setColorAt(i, col.setHex(v.c));
+  });
+  mesh.receiveShadow = true;
+  mesh.frustumCulled = false;
+  scene.add(mesh);
+
+  const sea = new THREE.Mesh(new THREE.PlaneGeometry(2000, 2000), new THREE.MeshStandardMaterial({ color: 0x2a86d2, roughness: 0.3 }));
+  sea.rotation.x = -Math.PI / 2;
+  sea.position.y = 1.3;
+  sea.receiveShadow = true;
+  scene.add(sea);
+}
+
+// --- Windmill blades (animated) ---------------------------------------------------------
+const windmillBlades = (() => {
+  const v = new Vox();
+  for (let k = 0; k < 4; k++) {
+    const a = (k / 4) * Math.PI * 2, ca = Math.cos(a), sa = Math.sin(a);
+    for (let r = 1; r <= 8; r++) {
+      v.set(ca * r, sa * r, 0, 0x6b4527);
+      if (r >= 2) {
+        for (let w = 1; w <= 2; w++) {
+          const x = ca * r - sa * w, y = sa * r + ca * w;
+          const frame = r === 2 || r === 8 || w === 2;
+          v.set(x, y, 0, frame ? 0x7a5230 : ((r + w) & 1 ? 0xfaf5ea : 0xece3d0));
+        }
+      }
+    }
+  }
+  v.box(-1, -1, -1, 1, 1, 0, 0x4d331d);
+  const mesh = v.build(voxMat);
+  const g = new THREE.Group();
+  g.add(mesh);
+  g.position.set(peak.x, peak.h + 10 + 0.5, peak.z + 5);
+  scene.add(g);
+  return g;
+})();
+
+// --- Boat ------------------------------------------------------------------------------
+const boat = (() => {
+  const v = new Vox();
+  for (let x = -4; x <= 4; x++) {
+    const w = x === -4 || x === 4 ? 0 : x === -3 || x === 3 ? 1 : 2;
+    for (let z = -w; z <= w; z++) {
+      v.set(x, 0, z, 0x8a5a32);
+      if (Math.abs(z) === w) v.set(x, 1, z, x % 2 ? 0xd9433b : 0xc23a33);
+    }
+  }
+  v.box(-1, 1, -1, 1, 1, 1, 0xa0703f);
+  v.line([3.6, 1, 0], [3.6, 2, 0], 0xf5f5f5);
+  const g = new THREE.Group();
+  const mesh = v.build(voxMat);
+  mesh.scale.setScalar(0.5);
+  g.add(mesh);
+  g.position.set(pier.x + 4, 1.4, pier.z1 - 2);
+  g.rotation.y = 0.3;
+  scene.add(g);
+  return g;
+})();
+
+// --- Clouds ------------------------------------------------------------------------------
+const clouds = [];
+for (let i = 0; i < 11; i++) {
+  const v = new Vox();
+  const blobs = 3 + Math.floor(rnd() * 3);
+  for (let b = 0; b < blobs; b++) {
+    const cx = (b - blobs / 2) * 2.2 + rnd() * 1.5, cz = (rnd() - 0.5) * 3;
+    const rx = 2 + rnd() * 1.8, ry = 1.2 + rnd() * 0.8, rz = 1.8 + rnd() * 1.2;
+    v.ellipsoid(cx, ry * 0.4, cz, rx, ry, rz, (x, y) => (y <= 0 ? 0xe6edf3 : 0xffffff));
+  }
+  const mesh = v.build(cloudMat, { cast: false, receive: false, jitter: 0.02 });
+  mesh.scale.setScalar(2);
+  const g = new THREE.Group();
+  g.add(mesh);
+  g.position.set((rnd() - 0.5) * 240, 34 + rnd() * 16, (rnd() - 0.5) * 200);
+  g.userData.speed = 1.2 + rnd() * 1.4;
+  scene.add(g);
+  clouds.push(g);
+}
+
+// ---------------------------------------------------------------------------
+// The pelican and its bicycle (character voxels, scaled down)
+// ---------------------------------------------------------------------------
+const S = 0.12;
+const C = {
+  frame: 0xd9403a, frameDark: 0xa82d29, tire: 0x2b2b30, tread: 0x3a3a40, rim: 0xcfd4da, spoke: 0xb3b9c1,
+  hub: 0x5a5f66, seat: 0x4a3222, grip: 0x232323, chrome: 0xdfe3e8, chain: 0x4a4d52,
+  white: 0xf8f6f0, cream: 0xe9e3d4, chest: 0xf3e6b4, black: 0x262626, grey: 0xc9c8c2,
+  beak: 0xf5b840, beakRidge: 0xf8d26a, beakTip: 0xe2672c, pouch: 0xef8a58, pouchDark: 0xdb7448,
+  leg: 0xf08a3a, legDark: 0xd87428, eye: 0x161616, eyeRing: 0xf2a65a, crest: 0xf5df8f,
+  basket: 0xb27a3d, basketDark: 0x8f5f2c, fish: 0xa8c7da, fishBack: 0x5c86a5, bell: 0xf2c94c,
+};
+const WHEEL_R = 7, WHEEL_Y = 8, REAR_X = -11, FRONT_X = 11, BB = { x: 0, y: 7 }, CRANK_R = 3;
+const STEER_X = 9;
+
+const rider = new THREE.Group();
+rider.rotation.order = 'YXZ';
+rider.scale.setScalar(S);
+scene.add(rider);
+const bikeRoot = new THREE.Group();
+bikeRoot.position.y = -0.5;
+rider.add(bikeRoot);
+
+// Wheels ----------------------------------------------------------------------
+function makeWheel() {
+  const v = new Vox();
+  for (let i = -8; i <= 8; i++) for (let j = -8; j <= 8; j++) {
+    const d = Math.hypot(i, j);
+    if (d >= 6.2 && d < 7.5) {
+      for (let z = -1; z <= 1; z++) v.set(i, j, z, z === 0 || (i + j) & 1 ? C.tire : C.tread);
+    } else if (d >= 5.3 && d < 6.2) v.set(i, j, 0, C.rim);
+    else if (d < 1.5) { v.set(i, j, 0, C.hub); v.set(i, j, 1, C.hub); v.set(i, j, -1, C.hub); }
+  }
+  for (let k = 0; k < 8; k++) {
+    const a = (k / 8) * Math.PI * 2 + 0.2;
+    v.line([Math.cos(a) * 1.5, Math.sin(a) * 1.5, 0], [Math.cos(a) * 5.3, Math.sin(a) * 5.3, 0], C.spoke);
+  }
+  v.set(0, 0, 2, C.chrome); v.set(0, 0, -2, C.chrome);
+  return v.build(voxMat);
+}
+const rearWheel = new THREE.Group();
+rearWheel.position.set(REAR_X, WHEEL_Y, 0);
+rearWheel.add(makeWheel());
+bikeRoot.add(rearWheel);
+
+// Static frame --------------------------------------------------------------------
+{
+  const v = new Vox();
+  for (const z of [-2, 2]) {
+    v.line([REAR_X, WHEEL_Y, z], [BB.x - 1, BB.y, z], C.frame);
+    v.line([REAR_X, WHEEL_Y, z], [-4, 17, z], C.frame);
+  }
+  v.line([-4, 17, -2], [-4, 17, 2], C.frame);
+  v.line([BB.x, BB.y, 0], [-4, 19, 0], C.frame);           // seat tube
+  v.line([-4, 18, 0], [8, 18, 0], C.frame);               // top tube
+  v.line([BB.x, BB.y, 0], [9, 15, 0], C.frame);           // down tube
+  v.line([BB.x + 1, BB.y, 0], [9, 16, 0], C.frame);
+  v.line([8, 19, 0], [9, 15, 0], C.frameDark);            // head tube
+  v.box(BB.x - 1, BB.y - 1, -2, BB.x + 1, BB.y + 1, 2, C.hub); // bottom bracket shell
+  v.line([-4, 19, 0], [-4, 20, 0], C.chrome);             // seat post
+  v.box(-7, 21, -1, -1, 21, 1, C.seat);                   // saddle
+  v.box(-8, 21, -2, -5, 21, 2, C.seat);
+  v.box(-7, 20, -1, -3, 20, 1, C.seat);
+  // chain + rear cog
+  for (let a = 0; a < Math.PI * 2; a += 0.4) v.set(REAR_X + Math.cos(a) * 1.4, WHEEL_Y + Math.sin(a) * 1.4, 3, C.chain);
+  v.line([REAR_X, WHEEL_Y + 1.5, 3], [BB.x, BB.y + 2.6, 3], C.chain);
+  v.line([REAR_X, WHEEL_Y - 1.5, 3], [BB.x, BB.y - 2.6, 3], C.chain);
+  // rear rack with a little red reflector
+  v.line([-4, 17, 0], [-13, 17, 0], C.chrome);
+  v.box(-14, 16, -1, -14, 17, 1, 0xff3b30);
+  bikeRoot.add(v.build(voxMat));
+}
+
+// Steering assembly: fork, front wheel, handlebars, basket with fish ----------------------
+const steer = new THREE.Group();
+steer.position.set(STEER_X, 0, 0);
+bikeRoot.add(steer);
+const frontWheel = new THREE.Group();
+frontWheel.position.set(FRONT_X - STEER_X, WHEEL_Y, 0);
+frontWheel.add(makeWheel());
+steer.add(frontWheel);
+const bellMesh = (() => {
+  const v = new Vox();
+  v.box(-1, 0, -1, 1, 0, 1, C.bell);
+  v.set(0, 1, 0, C.bell);
+  v.set(0, 2, 0, C.chrome);
+  return v.build(voxMat);
+})();
+{
+  const v = new Vox();
+  for (const z of [-2, 2]) v.line([9, 15, z], [FRONT_X, WHEEL_Y, z], C.frame); // fork legs
+  v.line([9, 15, -2], [9, 15, 2], C.frameDark);                                // fork crown
+  v.line([8, 19, 0], [8, 22, 0], C.chrome);                                    // stem
+  v.line([8, 22, -5], [8, 22, 5], C.chrome);                                   // handlebar
+  for (const z of [-5, 5]) { v.set(7, 22, z, C.grip); v.set(6, 22, z, C.grip); v.set(5, 22, z, C.grip); }
+  // basket (hollow wicker box)
+  const bx0 = 11, bx1 = 17, by0 = 17, by1 = 22, bz = 3;
+  for (let x = bx0; x <= bx1; x++) for (let y = by0; y <= by1; y++) for (let z = -bz; z <= bz; z++) {
+    const wall = x === bx0 || x === bx1 || z === -bz || z === bz || y === by0;
+    if (!wall) continue;
+    v.set(x, y, z, (x + y + z) & 1 ? C.basket : C.basketDark);
+  }
+  for (let x = bx0; x <= bx1; x++) { v.set(x, by1 + 1, -bz, C.basketDark); v.set(x, by1 + 1, bz, C.basketDark); }
+  v.line([9, 18, 0], [bx0, 19, 0], C.chrome);
+  // fish poking out of the basket
+  const fish = (x, z, up, tail) => {
+    for (let y = 0; y < 4; y++) {
+      v.set(x, by1 - 1 + y * up, z, y < 2 ? C.fish : C.fishBack);
+      v.set(x + 1, by1 - 1 + y * up, z, C.fish);
+    }
+    if (tail) { v.set(x - 1, by1 + 3, z, C.fishBack); v.set(x + 2, by1 + 3, z, C.fishBack); }
+    else { v.set(x, by1 + 2, z + 1, C.eye); v.set(x + 2, by1 + 1, z, C.fish); }
+  };
+  fish(13, -1, 1, false);
+  fish(15, 1, 1, true);
+  const mesh = v.build(voxMat);
+  mesh.position.x = -STEER_X;
+  steer.add(mesh);
+  bellMesh.position.set(8 - STEER_X, 23, -3);
+  steer.add(bellMesh);
+}
+
+// Crank (rotates) and pedals (stay level) -------------------------------------------------
+const crank = new THREE.Group();
+crank.position.set(BB.x, BB.y, 0);
+bikeRoot.add(crank);
+{
+  const v = new Vox();
+  for (let i = -3; i <= 3; i++) for (let j = -3; j <= 3; j++) {
+    const d = Math.hypot(i, j);
+    if (d >= 1.8 && d < 3.1) v.set(i, j, 3, (Math.atan2(j, i) * 4 / Math.PI + 8) % 2 < 1 ? C.chrome : 0xaeb4bb);
+  }
+  v.line([0, 0, 3], [0, 0, -4], C.chrome);
+  v.line([0, 0, 4], [CRANK_R, 0, 4], C.chrome);   // right crank arm
+  v.line([0, 0, -4], [-CRANK_R, 0, -4], C.chrome); // left crank arm
+  crank.add(v.build(voxMat));
+}
+function makePedal() {
+  const v = new Vox();
+  v.box(-1, 0, 0, 1, 0, 1, 0x34373c);
+  v.set(-1, 0, 1, 0xff9f1c); v.set(1, 0, 1, 0xff9f1c);
+  return v.build(voxMat);
+}
+const pedalR = new THREE.Group(); pedalR.add(makePedal()); bikeRoot.add(pedalR);
+const pedalL = new THREE.Group(); const pl = makePedal(); pl.scale.z = -1; pedalL.add(pl); bikeRoot.add(pedalL);
+
+// Pelican body ---------------------------------------------------------------------------
+const pelican = new THREE.Group();
+bikeRoot.add(pelican);
+{
+  const v = new Vox();
+  const cx = -2, cy = 27, tilt = 0.28, ct = Math.cos(tilt), st = Math.sin(tilt);
+  for (let x = -14; x <= 9; x++) for (let y = 18; y <= 36; y++) for (let z = -7; z <= 7; z++) {
+    const dx = x - cx, dy = y - cy;
+    const lx = dx * ct + dy * st, ly = -dx * st + dy * ct;
+    const inBody = (lx / 8.5) ** 2 + (ly / 6.2) ** 2 + (z / 5.4) ** 2 <= 1;
+    const inTail = lx < -7 && lx > -11.5 && Math.abs(ly - 0.8) < 1.4 && Math.abs(z) < 2.6 - (-7 - lx) * 0.3;
+    const wingZ = Math.abs(z) - 5.0;
+    const inWing = (((lx + 1) / 7.2) ** 2 + ((ly - 1.4) / 3.3) ** 2 + (wingZ / 1.5) ** 2) <= 1;
+    if (!inBody && !inTail && !inWing) continue;
+    let c = C.white;
+    if (inBody) {
+      if (ly < -3.2) c = C.cream;
+      if (lx > 5.2 && ly > -2.5) c = C.chest;
+    }
+    if (inTail) c = lx < -10.3 ? C.grey : C.white;
+    if (inWing) {
+      c = ly > 3.4 ? C.cream : C.white;
+      if (lx < -6.2 && ly < 2.6) c = C.black;
+      else if (lx < -5 && ly < 1.4) c = 0x55575a;
+    } else if (inBody && Math.abs(z) >= 4 && lx < -6.5 && ly > -1.5 && ly < 2) c = C.black;
+    v.set(x, y, z, c);
+  }
+  // wings reaching forward to the handlebar grips ("arms")
+  for (const s of [-1, 1]) {
+    v.line([1, 29, 5 * s], [4.6, 25, 5.6 * s], (t) => (t < 0.7 ? C.white : C.cream), 1.3);
+    v.line([4.6, 25, 5.6 * s], [6, 23.4, 5.4 * s], C.cream, 0.8);
+    v.set(6, 23, 5 * s, C.black); v.set(7, 23, 5 * s, C.black); v.set(6, 23, 6 * s, 0x55575a);
+  }
+  pelican.add(v.build(voxMat));
+}
+
+// Neck + head (animated as a group), pouch / lower jaw (opens to honk), eyes (blink) ---------
+const NECK_BASE = [5, 31, 0];
+const headGroup = new THREE.Group();
+headGroup.position.set(...NECK_BASE);
+pelican.add(headGroup);
+const jaw = new THREE.Group();
+const eyes = new THREE.Group();
+{
+  const v = new Vox();
+  const neck = [[4, 30], [6, 33.5], [7, 37], [6, 40], [5.6, 42.2], [6.5, 44.5]];
+  for (let i = 0; i < neck.length - 1; i++) {
+    v.line([neck[i][0], neck[i][1], 0], [neck[i + 1][0], neck[i + 1][1], 0], C.white, 1.9 - i * 0.12);
+  }
+  // nape tinged yellow (breeding plumage)
+  v.ellipsoid(7, 46, 0, 3.4, 3.0, 2.8, (x, y) => (x <= 5 && y >= 47 ? C.crest : C.white));
+  v.set(4, 48, 0, C.crest); v.set(3, 48, 0, C.crest); v.set(4, 49, 0, C.crest); v.set(3, 47, 0, C.crest);
+  // upper mandible
+  for (let x = 9; x <= 24; x++) {
+    const yTop = x <= 16 ? 46 : 45;
+    const w = x >= 22 ? 0 : 1;
+    for (let z = -w; z <= w; z++) v.set(x, yTop, z, z === 0 && x < 22 ? C.beakRidge : C.beak);
+    if (x <= 13) for (let z = -1; z <= 1; z++) v.set(x, yTop - 1, z, C.beak);
+  }
+  v.set(25, 45, 0, C.beakTip); v.set(25, 44, 0, C.beakTip); v.set(24, 45, 0, C.beakTip);
+  // eye ring (the eye itself is a separate mesh so it can blink)
+  for (const s of [-1, 1]) { v.set(7, 47, 3 * s, C.eyeRing); v.set(9, 47, 3 * s, C.eyeRing); }
+  const mesh = v.build(voxMat);
+  mesh.position.set(-NECK_BASE[0], -NECK_BASE[1], -NECK_BASE[2]);
+  headGroup.add(mesh);
+
+  // jaw + pouch, pivot at the hinge
+  const hinge = [9.5, 44.5, 0];
+  const p = new Vox();
+  for (let x = 10; x <= 23; x++) {
+    const t = (x - 10) / 13;
+    const sag = Math.round(0.6 + 4.8 * Math.pow(Math.sin(Math.PI * Math.min(1, t * 1.05)), 0.9));
+    for (let z = -1; z <= 1; z++) p.set(x, 44, z, C.beak); // lower mandible edge
+    for (let y = 43; y >= 44 - sag; y--) {
+      const wide = y < 43 && y > 44 - sag && sag >= 4 ? 2 : 1;
+      for (let z = -wide; z <= wide; z++) p.set(x, y, z, y === 44 - sag ? C.pouchDark : C.pouch);
+    }
+  }
+  const jm = p.build(voxMat);
+  jm.position.set(-hinge[0], -hinge[1], -hinge[2]);
+  jaw.position.set(hinge[0] - NECK_BASE[0], hinge[1] - NECK_BASE[1], 0);
+  jaw.add(jm);
+  headGroup.add(jaw);
+
+  const e = new Vox();
+  for (const s of [-1, 1]) { e.set(8, 47, 3 * s, C.eye); e.set(8, 48, 3 * s, 0xffffff); }
+  const em = e.build(voxMat, { jitter: 0 });
+  em.position.set(-8, -47.5, 0);
+  eyes.position.set(8 - NECK_BASE[0], 47.5 - NECK_BASE[1], 0);
+  eyes.add(em);
+  headGroup.add(eyes);
+}
+
+// Legs: thigh + shin bones solved with 2-bone IK, webbed feet on the pedals ------------------
+const L1 = 10, L2 = 10;
+function makeBone(len, feathered) {
+  const v = new Vox();
+  for (let i = 0; i <= len; i++) {
+    if (feathered && i <= 5) {
+      for (let a = -1; a <= 2; a++) for (let b = -1; b <= 2; b++) {
+        if ((a === -1 || a === 2) && (b === -1 || b === 2)) continue;
+        if (i === 5 && (a === -1 || a === 2 || b === -1 || b === 2)) continue;
+        v.set(i, a, b, (a + i) % 3 === 0 ? C.cream : C.white);
+      }
+    } else {
+      for (let a = 0; a <= 1; a++) for (let b = 0; b <= 1; b++) v.set(i, a, b, (i + a) % 4 === 0 ? C.legDark : C.leg);
+    }
+  }
+  const mesh = v.build(voxMat);
+  mesh.position.set(0, -0.5, -0.5);
+  const g = new THREE.Group();
+  g.add(mesh);
+  return g;
+}
+function makeFoot() {
+  const v = new Vox();
+  for (let x = -1; x <= 3; x++) for (let z = -1; z <= 1; z++) v.set(x, 0, z, x === 3 ? C.legDark : C.leg);
+  v.set(4, 0, -1, C.legDark); v.set(4, 0, 1, C.legDark);
+  v.set(0, 1, 0, C.leg);
+  const g = new THREE.Group();
+  g.add(v.build(voxMat));
+  return g;
+}
+const legs = [1, -1].map((side) => {
+  const thigh = makeBone(L1, true), shin = makeBone(L2, false), foot = makeFoot();
+  bikeRoot.add(thigh, shin, foot);
+  return { side, thigh, shin, foot, hipZ: 3.5 * side, legZ: 4.6 * side, footZ: 5 * side };
+});
+function solveLeg(hx, hy, tx, ty) {
+  const dx = tx - hx, dy = ty - hy;
+  const d = THREE.MathUtils.clamp(Math.hypot(dx, dy), Math.abs(L1 - L2) + 0.01, L1 + L2 - 0.01);
+  const base = Math.atan2(dy, dx);
+  const a = Math.acos((L1 * L1 + d * d - L2 * L2) / (2 * L1 * d));
+  const thigh = base + a;
+  const kx = hx + Math.cos(thigh) * L1, ky = hy + Math.sin(thigh) * L1;
+  return { thigh, kx, ky, shin: Math.atan2(ty - ky, tx - kx) };
+}
+
+// ---------------------------------------------------------------------------
+// Gulls, a jumping fish and a little particle system
+// ---------------------------------------------------------------------------
+function makeGull() {
+  const g = new THREE.Group();
+  const b = new Vox();
+  b.ellipsoid(0, 0, 0, 4, 1.6, 1.6, 0xffffff);
+  b.ellipsoid(4.2, 1, 0, 1.7, 1.5, 1.4, 0xffffff);
+  b.set(6.2, 1, 0, 0xf2b53b); b.set(7.2, 0.6, 0, 0xf2b53b);
+  b.set(5, 1.8, 1, 0x111111); b.set(5, 1.8, -1, 0x111111);
+  b.box(-6, 0, -1, -4, 0, 1, 0xc9ced3);
+  g.add(b.build(voxMat, { cast: false }));
+  const wings = [1, -1].map((s) => {
+    const w = new Vox();
+    for (let z = 1; z <= 8; z++) for (let x = -2; x <= 1; x++) {
+      if (z > 5 && x === 1) continue;
+      w.set(x - (z > 6 ? 1 : 0), 0, z * s, z >= 7 ? 0x2b2b2b : 0xbfc5cb);
+    }
+    const wg = new THREE.Group();
+    wg.position.set(0, 0.6, s);
+    const m = w.build(voxMat, { cast: false });
+    m.position.z = -s;
+    wg.add(m);
+    g.add(wg);
+    return wg;
+  });
+  g.scale.setScalar(0.11);
+  g.rotation.order = 'YXZ';
+  g.userData = { wings };
+  return g;
+}
+const gulls = [];
+for (let i = 0; i < 5; i++) {
+  const g = makeGull();
+  g.userData.cx = (rnd() - 0.5) * 30;
+  g.userData.cz = (rnd() - 0.5) * 30;
+  g.userData.r = 12 + rnd() * 16;
+  g.userData.y = 17 + rnd() * 9;
+  g.userData.w = (0.25 + rnd() * 0.2) * (rnd() < 0.5 ? -1 : 1);
+  g.userData.ph = rnd() * Math.PI * 2;
+  scene.add(g);
+  gulls.push(g);
+}
+
+const jumper = (() => {
+  const v = new Vox();
+  v.ellipsoid(0, 0, 0, 4, 1.6, 1.1, (x, y) => (y >= 1 ? C.fishBack : C.fish));
+  v.box(-6, -1, 0, -5, 1, 0, C.fishBack);
+  v.set(-7, -2, 0, C.fishBack); v.set(-7, 2, 0, C.fishBack);
+  v.set(2, 1, 1, C.eye); v.set(2, 1, -1, C.eye);
+  v.set(0, 2, 0, C.fishBack);
+  const g = new THREE.Group();
+  g.add(v.build(voxMat));
+  g.scale.setScalar(0.13);
+  g.rotation.order = 'YZX';
+  g.visible = false;
+  scene.add(g);
+  return { g, t: -2.5, x: 0, z: 0, dir: 0, dur: 1.15 };
+})();
+
+const particles = (() => {
+  const MAX = 160;
+  const mesh = new THREE.InstancedMesh(BOX, plainMat, MAX);
+  mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+  mesh.frustumCulled = false;
+  const col = new THREE.Color(0xffffff);
+  const zero = new THREE.Matrix4().makeScale(0, 0, 0);
+  for (let i = 0; i < MAX; i++) { mesh.setMatrixAt(i, zero); mesh.setColorAt(i, col); }
+  scene.add(mesh);
+  const items = Array.from({ length: MAX }, () => ({ life: 0, max: 1, p: new THREE.Vector3(), v: new THREE.Vector3(), s: 0.2, g: 0 }));
+  let next = 0;
+  const m = new THREE.Matrix4(), q = new THREE.Quaternion(), sc = new THREE.Vector3();
+  return {
+    spawn(p, v, color, size, life, gravity) {
+      const it = items[next];
+      it.p.copy(p); it.v.copy(v); it.s = size; it.life = it.max = life; it.g = gravity;
+      mesh.setColorAt(next, col.setHex(color));
+      mesh.instanceColor.needsUpdate = true;
+      next = (next + 1) % MAX;
+    },
+    update(dt) {
+      for (let i = 0; i < MAX; i++) {
+        const it = items[i];
+        if (it.life <= 0) continue;
+        it.life -= dt;
+        it.v.y -= it.g * dt;
+        it.p.addScaledVector(it.v, dt);
+        const k = Math.max(0, it.life / it.max);
+        m.compose(it.p, q, sc.setScalar(it.s * (0.35 + 0.65 * k)));
+        mesh.setMatrixAt(i, it.life > 0 ? m : zero);
+      }
+      mesh.instanceMatrix.needsUpdate = true;
+    },
+  };
+})();
+
+// ---------------------------------------------------------------------------
+// Sound: a bicycle bell and a pelican honk (WebAudio, created on first use)
+// ---------------------------------------------------------------------------
+let audio = null;
+const getAudio = () => {
+  if (!audio) {
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (!Ctx) return null;
+    audio = new Ctx();
+  }
+  if (audio.state === 'suspended') audio.resume();
+  return audio;
+};
+function playBell() {
+  const ac = getAudio();
+  if (!ac) return;
+  for (const delay of [0, 0.2]) {
+    const t = ac.currentTime + delay;
+    for (const [f, g] of [[2093, 0.22], [2794, 0.1], [4186, 0.05]]) {
+      const o = ac.createOscillator(), gn = ac.createGain();
+      o.frequency.value = f;
+      gn.gain.setValueAtTime(0, t);
+      gn.gain.linearRampToValueAtTime(g, t + 0.004);
+      gn.gain.exponentialRampToValueAtTime(0.0001, t + 1.1);
+      o.connect(gn).connect(ac.destination);
+      o.start(t); o.stop(t + 1.15);
+    }
+  }
+}
+function playHonk() {
+  const ac = getAudio();
+  if (!ac) return;
+  for (const [delay, f] of [[0, 360], [0.17, 300]]) {
+    const t = ac.currentTime + delay;
+    const o = ac.createOscillator(), filt = ac.createBiquadFilter(), gn = ac.createGain();
+    o.type = 'sawtooth';
+    o.frequency.setValueAtTime(f, t);
+    o.frequency.exponentialRampToValueAtTime(f * 0.78, t + 0.14);
+    filt.type = 'lowpass'; filt.frequency.value = 1100; filt.Q.value = 6;
+    gn.gain.setValueAtTime(0, t);
+    gn.gain.linearRampToValueAtTime(0.16, t + 0.015);
+    gn.gain.exponentialRampToValueAtTime(0.0001, t + 0.16);
+    o.connect(filt).connect(gn).connect(ac.destination);
+    o.start(t); o.stop(t + 0.18);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Camera & controls
+// ---------------------------------------------------------------------------
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.08;
+controls.maxPolarAngle = Math.PI * 0.47;
+controls.minDistance = 3;
+controls.maxDistance = 160;
+controls.autoRotateSpeed = 0.5;
+let camMode = 'follow';
+let lastYaw = null;
+
+const UP = new THREE.Vector3(0, 1, 0);
+const tmpV = new THREE.Vector3(), tmpV2 = new THREE.Vector3();
+const riderFocus = new THREE.Vector3();
+
+function setCamMode(mode) {
+  camMode = mode;
+  document.querySelectorAll('[data-cam]').forEach((b) => b.classList.toggle('on', b.dataset.cam === mode));
+  controls.enabled = mode !== 'chase';
+  controls.autoRotate = mode === 'island';
+  if (mode === 'follow') controls.target.copy(riderFocus);
+  if (mode === 'island' && camera.position.distanceTo(controls.target) < 40) {
+    camera.position.set(52, 42, 58);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// UI wiring
+// ---------------------------------------------------------------------------
+let speedMul = 1, paused = false;
+let honkT = 99, bellT = 99;
+const pauseBtn = document.getElementById('pause');
+document.querySelectorAll('[data-cam]').forEach((b) => b.addEventListener('click', () => setCamMode(b.dataset.cam)));
+pauseBtn.addEventListener('click', () => { paused = !paused; pauseBtn.textContent = paused ? 'Ride' : 'Pause'; });
+const ringBell = () => { bellT = 0; playBell(); };
+const honk = () => { honkT = 0; playHonk(); };
+document.getElementById('bell').addEventListener('click', ringBell);
+document.getElementById('speed').addEventListener('input', (e) => { speedMul = parseFloat(e.target.value); });
+window.addEventListener('keydown', (e) => {
+  if (e.target instanceof HTMLInputElement) return;
+  if (e.key === '1') setCamMode('follow');
+  else if (e.key === '2') setCamMode('chase');
+  else if (e.key === '3') setCamMode('island');
+  else if (e.key === ' ') { e.preventDefault(); pauseBtn.click(); }
+  else if (e.key === 'b' || e.key === 'B') ringBell();
+  else if (e.key === 'h' || e.key === 'H') honk();
+});
+const raycaster = new THREE.Raycaster();
+const pointer = new THREE.Vector2();
+let downAt = null;
+renderer.domElement.addEventListener('pointerdown', (e) => { downAt = [e.clientX, e.clientY]; });
+renderer.domElement.addEventListener('pointerup', (e) => {
+  if (!downAt || Math.hypot(e.clientX - downAt[0], e.clientY - downAt[1]) > 6) return;
+  pointer.set((e.clientX / window.innerWidth) * 2 - 1, -(e.clientY / window.innerHeight) * 2 + 1);
+  raycaster.setFromCamera(pointer, camera);
+  if (raycaster.intersectObject(rider, true).length) honk();
+});
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+// ---------------------------------------------------------------------------
+// Animation loop
+// ---------------------------------------------------------------------------
+const BASE_SPEED = 4.4;
+const WHEEL_WORLD_R = (WHEEL_R + 0.3) * S;
+let dist = track.total * 0.93, curV = BASE_SPEED, wheelAng = 0, crankAng = 0, time = 0;
+let lean = 0, steerAng = 0, dustT = 0, blinkT = 2.5;
+const clock = new THREE.Clock();
+
+function placeRider(dt) {
+  dist += curV * dt;
+  const p = trackAt(dist), pa = trackAt(dist - 0.7), pb = trackAt(dist + 0.7);
+  const yaw = Math.atan2(-p.tz, p.tx);
+  const kappa = wrapAngle(Math.atan2(-pb.tz, pb.tx) - Math.atan2(-pa.tz, pa.tx)) / 1.4;
+  const targetLean = THREE.MathUtils.clamp(-Math.atan((curV * curV * kappa) / 9.8), -0.35, 0.35);
+  lean += (targetLean - lean) * (1 - Math.exp(-4 * dt));
+  steerAng += (Math.atan(22 * S * kappa) * 0.9 - steerAng) * (1 - Math.exp(-4 * dt));
+  rider.position.set(p.x, TRACK_TOP, p.z);
+  rider.rotation.set(lean, yaw, 0);
+  steer.rotation.y = steerAng;
+  return yaw;
+}
+
+function animateRider(dt) {
+  const spin = (curV * dt) / WHEEL_WORLD_R;
+  wheelAng -= spin;
+  crankAng -= spin * 0.45;
+  rearWheel.rotation.z = wheelAng;
+  frontWheel.rotation.z = wheelAng;
+  crank.rotation.z = crankAng;
+
+  const effort = Math.min(1, curV / BASE_SPEED);
+  const bob = Math.sin(crankAng * 2) * 0.35 * effort;
+  pelican.position.y = bob;
+  pelican.rotation.z = Math.sin(crankAng * 2 + 0.6) * 0.012 * effort;
+  pelican.rotation.x = Math.sin(crankAng) * 0.02 * effort;
+
+  // head: bobbing, looking into turns, perk up on bell / honk
+  const perk = Math.max(Math.exp(-bellT * 3) * Math.sin(bellT * 14), 0) * 0.08;
+  headGroup.rotation.z = Math.sin(time * 2.1) * 0.035 + Math.sin(crankAng * 2) * 0.02 * effort + perk + (honkT < 0.6 ? 0.12 * Math.sin((honkT / 0.6) * Math.PI) : 0);
+  headGroup.rotation.y = steerAng * 1.6 + Math.sin(time * 0.37) * 0.12;
+  headGroup.position.x = NECK_BASE[0] + Math.sin(crankAng * 2) * 0.25 * effort;
+
+  // pouch jiggle and honk jaw
+  const jawOpen = honkT < 0.5 ? Math.sin((honkT / 0.5) * Math.PI) * 0.32 : 0;
+  jaw.rotation.z = -jawOpen;
+  jaw.scale.y = 1 + Math.sin(crankAng * 2 + 1.2) * 0.07 * effort + Math.sin(time * 9) * 0.015;
+
+  // blink
+  blinkT -= dt;
+  if (blinkT < 0) blinkT = 2 + Math.random() * 3.5;
+  eyes.scale.y = blinkT < 0.13 ? 0.15 : 1;
+
+  bellMesh.rotation.y = bellT < 0.6 ? Math.sin(bellT * 60) * 0.4 * (1 - bellT / 0.6) : 0;
+
+  // pedals and legs
+  for (const leg of legs) {
+    const a = crankAng + (leg.side > 0 ? 0 : Math.PI);
+    const px = BB.x + Math.cos(a) * CRANK_R, py = BB.y + Math.sin(a) * CRANK_R;
+    const pedal = leg.side > 0 ? pedalR : pedalL;
+    pedal.position.set(px, py, 5 * leg.side);
+    const hx = -1, hy = 23 + bob;
+    const ik = solveLeg(hx, hy, px, py + 1.6);
+    leg.thigh.position.set(hx, hy, leg.hipZ);
+    leg.thigh.rotation.z = ik.thigh;
+    leg.shin.position.set(ik.kx, ik.ky, leg.legZ);
+    leg.shin.rotation.z = ik.shin;
+    leg.foot.position.set(px - 1, py + 1, leg.footZ);
+  }
+}
+
+function updateWorld(dt, yaw) {
+  waterUniforms.uTime.value = time;
+  windmillBlades.rotation.z -= dt * 0.9;
+  boat.position.y = 1.35 + Math.sin(time * 1.3) * 0.12;
+  boat.rotation.z = Math.sin(time * 1.1) * 0.06;
+  boat.rotation.x = Math.cos(time * 0.9) * 0.04;
+
+  for (const c of clouds) {
+    c.position.x += c.userData.speed * dt;
+    if (c.position.x > 140) c.position.x = -140;
+  }
+
+  for (const g of gulls) {
+    const u = g.userData;
+    const ang = u.ph + time * u.w;
+    g.position.set(u.cx + Math.cos(ang) * u.r, u.y + Math.sin(time * 0.6 + u.ph) * 1.2, u.cz + Math.sin(ang) * u.r);
+    const vx = -Math.sin(ang) * Math.sign(u.w), vz = Math.cos(ang) * Math.sign(u.w);
+    g.rotation.set(-0.35 * Math.sign(u.w), Math.atan2(-vz, vx), 0);
+    const flapping = Math.sin(time * 0.5 + u.ph * 3) > -0.2;
+    const f = flapping ? Math.sin(time * 9 + u.ph) * 0.55 : 0.08;
+    u.wings[0].rotation.x = f;
+    u.wings[1].rotation.x = -f;
+  }
+
+  // jumping fish
+  const j = jumper;
+  j.t += dt;
+  if (j.t > j.dur + 2.5) {
+    for (let k = 0; k < 20; k++) {
+      const a = rnd() * Math.PI * 2, r = 36 + rnd() * 18;
+      const x = Math.cos(a) * r, z = Math.sin(a) * r;
+      if (hAt(Math.round(x), Math.round(z)) === 0 && hAt(Math.round(x + 4), Math.round(z)) === 0) {
+        j.x = x; j.z = z; j.dir = rnd() * Math.PI * 2; j.t = 0;
+        break;
+      }
+    }
+  }
+  if (j.t >= 0 && j.t <= j.dur) {
+    const u = j.t / j.dur;
+    const dx = Math.cos(j.dir), dz = -Math.sin(j.dir);
+    j.g.visible = true;
+    j.g.position.set(j.x + dx * u * 4.5, 1.2 + 4 * 2.6 * u * (1 - u), j.z + dz * u * 4.5);
+    j.g.rotation.set(0, j.dir, Math.atan2(2.6 * 4 * (1 - 2 * u), 4.5));
+    if ((j.t - dt <= 0) || (j.t + dt > j.dur && j.t <= j.dur && !j.splashed)) {
+      j.splashed = j.t > j.dur * 0.5;
+      for (let k = 0; k < 12; k++) {
+        particles.spawn(tmpV.set(j.g.position.x, 1.5, j.g.position.z),
+          tmpV2.set((rnd() - 0.5) * 2.5, 2.5 + rnd() * 2.5, (rnd() - 0.5) * 2.5), rnd() < 0.5 ? 0xffffff : 0xbfe9fb, 0.22, 0.7, 9);
+      }
+    }
+  } else {
+    j.g.visible = false;
+    j.splashed = false;
+  }
+
+  // dust from the rear wheel
+  dustT -= dt;
+  if (curV > 0.6 && dustT <= 0) {
+    dustT = 0.06 / Math.min(2, curV / BASE_SPEED);
+    tmpV.set(REAR_X - 6, 0.8, (rnd() - 0.5) * 3);
+    bikeRoot.localToWorld(tmpV);
+    const back = tmpV2.set(-Math.cos(yaw), 0, Math.sin(yaw)).multiplyScalar(0.6 + rnd() * 0.6);
+    back.y = 0.5 + rnd() * 0.6;
+    particles.spawn(tmpV, back, rnd() < 0.5 ? 0xd9bd8a : 0xc9a874, 0.16 + rnd() * 0.1, 0.8, 0.6);
+  }
+  particles.update(dt);
+}
+
+function updateCamera(dt, yaw) {
+  riderFocus.set(rider.position.x, rider.position.y + 2.6, rider.position.z);
+  const dYaw = lastYaw === null ? 0 : wrapAngle(yaw - lastYaw);
+  lastYaw = yaw;
+  if (camMode === 'follow') {
+    // keep the same view of the rider: translate with it and turn with its heading
+    tmpV.subVectors(camera.position, controls.target).applyAxisAngle(UP, dYaw);
+    controls.target.copy(riderFocus);
+    camera.position.copy(riderFocus).add(tmpV);
+  } else if (camMode === 'island') {
+    controls.target.lerp(tmpV.set(0, 6, 0), 1 - Math.exp(-2 * dt));
+  } else {
+    const fwd = tmpV.set(Math.cos(yaw), 0, -Math.sin(yaw));
+    const right = tmpV2.set(Math.sin(yaw), 0, Math.cos(yaw));
+    const desired = new THREE.Vector3().copy(rider.position)
+      .addScaledVector(fwd, -7.5).addScaledVector(right, 2.2).addScaledVector(UP, 4.2);
+    camera.position.lerp(desired, 1 - Math.exp(-3.5 * dt));
+    const look = new THREE.Vector3().copy(rider.position).addScaledVector(fwd, 3).addScaledVector(UP, 2.4);
+    camera.lookAt(look);
+    controls.target.copy(look);
+  }
+  if (controls.enabled) controls.update();
+}
+
+// initial placement
+{
+  const yaw = placeRider(0);
+  animateRider(0);
+  riderFocus.set(rider.position.x, rider.position.y + 2.6, rider.position.z);
+  controls.target.copy(riderFocus);
+  // front-left three-quarter view from the outside of the track
+  const fwd = new THREE.Vector3(Math.cos(yaw), 0, -Math.sin(yaw));
+  const right = new THREE.Vector3(Math.sin(yaw), 0, Math.cos(yaw));
+  camera.position.copy(riderFocus).addScaledVector(right, -10).addScaledVector(fwd, 5).addScaledVector(UP, 4.6);
+  camera.lookAt(riderFocus);
+  controls.update();
+}
+
+// optional URL params, e.g. ?cam=chase
+{
+  const params = new URLSearchParams(location.search);
+  const cam = params.get('cam');
+  if (cam === 'chase' || cam === 'island' || cam === 'follow') setCamMode(cam);
+}
+
+document.getElementById('msg').remove();
+window.pelicanScene = { scene, camera, controls, rider, setCamMode };
+
+function tick() {
+  const dt = Math.min(clock.getDelta(), 0.05);
+  time += dt;
+  honkT += dt;
+  bellT += dt;
+  const targetV = paused ? 0 : BASE_SPEED * speedMul;
+  curV += (targetV - curV) * (1 - Math.exp(-2.5 * dt));
+  if (curV < 0.01 && paused) curV = 0;
+  const yaw = placeRider(dt);
+  animateRider(dt);
+  updateWorld(dt, yaw);
+  updateCamera(dt, yaw);
+  renderer.render(scene, camera);
+}
+renderer.setAnimationLoop(tick);
+</script>
+</body>
+</html>
