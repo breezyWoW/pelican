@@ -1970,7 +1970,7 @@ const pipeline = new THREE.RenderPipeline(renderer);
 pipeline.outputColorTransform = false;
 const scenePass = pass(scene, camera);
 const sceneColor = scenePass.getTextureNode('output');
-const bloomPass = bloom(sceneColor, 0.42, 0.42, 0.95);
+const bloomPass = bloom(sceneColor, 0.38, 0.42, 1.15);
 const vignette = Fn(() => { const q = screenUV.sub(0.5).mul(vec2(U.aspect, 1.0)); return smoothstep(1.25, 0.25, length(q)).mul(0.35).add(0.65); })();
 const graded = sceneColor.add(bloomPass).mul(U.exposure).mul(vignette);
 const dither = hash(screenUV.mul(screenSize).x.add(screenUV.mul(screenSize).y.mul(1931.0)).add(time.mul(60.0).floor())).sub(0.5).mul(1.0 / 255.0);
@@ -2059,17 +2059,23 @@ function applyVariantUI(v) {
   ui.stones.hidden = v === 'classic';
   ui.card.hidden = true; selectStoneButton(null);
 }
-let switching = false, swapAt = 0, swapTo = null;
+let switching = false, pendingVariant = null;
 async function setVariant(v, instant) {
-  if (v === current || switching) return;
+  if (switching) { pendingVariant = v; return; }   // apply the latest choice once the current switch ends
+  if (v === current) return;
   switching = true;
   if (v !== 'classic') await ensureInfinity();
   if ((v === 'both') !== (current === 'both')) { const h = homeFor(v); flyTo(h.pos, h.target, 1.4); }
-  if (instant || reduceMotion) { doSwap(v); switching = false; return; }
+  if (instant || reduceMotion) { doSwap(v); finishSwitch(); return; }
   strike(1.1);
   transition = { t: 0, to: v, swapped: false };
 }
 let transition = null;
+function finishSwitch() {
+  switching = false;
+  const next = pendingVariant; pendingVariant = null;
+  if (next && next !== current) setVariant(next);
+}
 const SIDE = 150;   // mm from the centre for the side-by-side view
 function doSwap(v) {
   current = v;
@@ -2215,7 +2221,7 @@ function frame() {
     const k = transition.t;
     U.exposure.value = 1 + Math.max(0, 1 - Math.abs(k - 0.45) / 0.35) * 2.2;
     if (!transition.swapped && k >= 0.45) { doSwap(transition.to); transition.swapped = true; }
-    if (k >= 1) { transition = null; U.exposure.value = 1; switching = false; }
+    if (k >= 1) { transition = null; U.exposure.value = 1; finishSwitch(); }
   }
 
   // lightning bursts
